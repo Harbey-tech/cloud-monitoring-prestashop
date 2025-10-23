@@ -1,0 +1,182 @@
+---
+- name: Install PrestaShop on EC2 with RDS backend
+  hosts: all
+  become: yes
+  vars:
+    prestashop_version: "8.1.7"
+    install_dir: "/var/www/html"
+    prestashop_url: "https://github.com/PrestaShop/PrestaShop/releases/download/{{ prestashop_version }}/prestashop_{{ prestashop_version }}.zip"
+
+    domain_name: "98.93.189.86"
+    rds_endpoint: "prestashop-db.c6nk2ymquuml.us-east-1.rds.amazonaws.com:3306"
+    rds_username: "prestashop"
+    rds_password: "PrestashopPass123"
+    db_name: "prestashop"
+
+    admin_email: "admin@example.com"
+    admin_password: "Admin1234"
+
+  tasks:
+    # ------------------------
+    # System & Python setup
+    # ------------------------
+    - name: Update apt packages
+      apt:
+        update_cache: yes
+
+    - name: Install Python3 MySQL library for Ansible
+      apt:
+        name: python3-pymysql
+        state: present
+
+    # ------------------------
+    # LAMP stack + PHP
+    # ------------------------
+    - name: Install Apache, PHP, and required extensions
+      apt:
+        name:
+          - apache2
+          - php
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-intl
+          - php-mbstring
+          - php-xml
+          - php-zip
+          - php-json
+          - php-cli
+          - unzip
+          - curl
+          - wget
+        state: present
+
+    - name: Enable Apache rewrite module
+      shell: a2enmod rewrite
+
+    - name: Start and enable Apache
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    # ------------------------
+    # PrestaShop setup
+    # ------------------------
+    - name: Clean web root
+      file:
+        path: "{{ install_dir }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Recreate web root
+      file:
+        path: "{{ install_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Download official PrestaShop release
+      get_url:
+        url: "{{ prestashop_url }}"
+        dest: /tmp/prestashop.zip
+        mode: '0644'
+
+    - name: Extract PrestaShop archive
+      unarchive:
+        src: /tmp/prestashop.zip
+        dest: "{{ install_dir }}"
+        remote_src: yes
+
+    - name: Set directory ownership and permissions
+      file:
+        path: "{{ install_dir }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    # ------------------------
+    # Apache VirtualHost
+    # ------------------------
+    - name: Configure Apache VirtualHost for PrestaShop
+      copy:
+        dest: /etc/apache2/sites-available/prestashop.conf
+        content: |
+          <VirtualHost *:80>
+              ServerAdmin webmaster@localhost
+              DocumentRoot {{ install_dir }}
+              ServerName {{ domain_name }}
+
+              <Directory {{ install_dir }}>
+                  AllowOverride All
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/prestashop_error.log
+              CustomLog ${APACHE_LOG_DIR}/prestashop_access.log combined
+          </VirtualHost>
+
+    - name: Enable PrestaShop site
+      command: a2ensite prestashop.conf
+
+    - name: Disable default Apache site
+      command: a2dissite 000-default.conf
+      ignore_errors: yes
+
+    - name: Reload Apache
+      service:
+        name: apache2
+        state: reloaded
+
+    # ------------------------
+    # RDS Database
+    # ------------------------
+    - name: Ensure PrestaShop database exists in RDS
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_host: "{{ rds_endpoint.split(':')[0] }}"
+        login_port: "{{ rds_endpoint.split(':')[1]|int }}"
+        login_user: "{{ rds_username }}"
+        login_password: "{{ rds_password }}"
+
+    # ------------------------
+    # PrestaShop CLI install
+    # ------------------------
+    - name: Install PrestaShop via CLI (using RDS)
+      shell: |
+        if [ -f "{{ install_dir }}/install/index_cli.php" ]; then
+          php {{ install_dir }}/install/index_cli.php \
+            --domain="{{ domain_name }}" \
+            --db_server="{{ rds_endpoint.split(':')[0] }}" \
+            --db_port="{{ rds_endpoint.split(':')[1]|int }}" \
+            --db_name="{{ db_name }}" \
+            --db_user="{{ rds_username }}" \
+            --db_password="{{ rds_password }}" \
+            --email="{{ admin_email }}" \
+            --password="{{ admin_password }}" \
+            --prefix="ps_" \
+            --language="en" \
+            --country="us" \
+            --all_languages=0 \
+            --newsletter=0 \
+            --send_email=0
+        fi
+
+    - name: Remove installation folder for security
+      file:
+        path: "{{ install_dir }}/install"
+        state: absent
+
+    - name: Restart Apache
+      service:
+        name: apache2
+        state: restarted
+
+    - name: Show installation summary
+      debug:
+        msg:
+          - "✅ PrestaShop {{ prestashop_version }} installed successfully!"
+          - "🌐 Access: http://{{ domain_name }}/"
+          - "🔑 Admin: {{ admin_email }} / {{ admin_password }}"
+          - "🗄️ Connected to RDS: {{ rds_endpoint }}"
